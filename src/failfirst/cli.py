@@ -35,7 +35,11 @@ def build_parser():
     p.add_argument("--before", help="revision before the fix (default: first parent of --after)")
     p.add_argument("--test", action="append", required=True, metavar="PATH",
                    help="test file, relative to the repo root (repeatable)")
+    p.add_argument("--runner", choices=("auto", "unittest", "pytest"), default="auto",
+                   help="test runner (default: auto, decided from the test files)")
     p.add_argument("--json", action="store_true", help="print machine-readable JSON")
+    p.add_argument("--show-all", action="store_true",
+                   help="text report: also list every not-detected unit (--json always has all)")
     p.add_argument("--keep", action="store_true", help="keep the temporary worktrees")
     p.add_argument("--timeout", type=float, default=300.0, metavar="SEC",
                    help="timeout per side in seconds (default: 300)")
@@ -47,10 +51,42 @@ def _tail(text, n=2000):
     return text[-n:] if text else ""
 
 
-def run_side(python, worktree_dir, tests, timeout, scratch, name):
+def _file_runner(text):
+    uses_unittest = "unittest.TestCase" in text or "(TestCase)" in text
+    uses_pytest = "import pytest" in text or "from pytest" in text
+    return "unittest" if uses_unittest and not uses_pytest else "pytest"
+
+
+def choose_runner(requested, after_dir, tests):
+    """Return (runner, note). ``note`` is None unless auto had to make a compromise."""
+    if requested != "auto":
+        return requested, None
+    found = {}
+    for t in tests:
+        with open(os.path.join(after_dir, t), encoding="utf-8", errors="replace") as fh:
+            found[t] = _file_runner(fh.read())
+    if len(set(found.values())) <= 1:
+        return (next(iter(found.values())) if found else "pytest"), None
+    detail = ", ".join(f"{t}: {r}" for t, r in found.items())
+    return "pytest", (f"test files look like different runners ({detail}); "
+                      "using pytest, which can also run unittest tests")
+
+
+def check_pytest_available(python):
+    try:
+        proc = subprocess.run([python, "-c", "import pytest"], stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL)
+        ok = proc.returncode == 0
+    except OSError:
+        ok = False
+    if not ok:
+        raise wt.UsageError(f"pytest is not installed in {python}; install it or pass --python")
+
+
+def run_side(python, worktree_dir, tests, timeout, scratch, name, runner="unittest"):
     """Run child.py in one worktree. Always returns a side dict."""
     out_path = os.path.join(scratch, f"{name}-result.json")
-    cmd = [python, CHILD, "--worktree", worktree_dir, "--out", out_path]
+    cmd = [python, CHILD, "--worktree", worktree_dir, "--out", out_path, "--runner", runner]
     for t in tests:
         cmd += ["--test", t]
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
@@ -98,11 +134,16 @@ def _outcome_text(outcome):
     return "pass (subTests reported separately)" if outcome == "subtests_only" else outcome
 
 
-def render_text(report):
+def render_text(report, show_all=False):
     lines = []
     add = lines.append
     add(f"failfirst verdict: {report['verdict']}")
     add("")
+    if report.get("runner"):
+        how = "chosen with --runner" if report.get("runner_requested") != "auto" else "auto-selected"
+        add(f"runner: {report['runner']} ({how})")
+        if report.get("runner_note"):
+            add(f"note: {report['runner_note']}")
     add(f"before: {report['before']['sha']}" + ("" if report["before"]["explicit"] else "  (first parent of after)"))
     add(f"after:  {report['after']['sha']}")
     add("")
@@ -136,9 +177,14 @@ def render_text(report):
         c = report["counts"]
         add("")
         add(f"Per test / subTest ({len(units)} units: {c['detected']} detected, "
-            f"{c['not-detected']} not-detected, {c['inconclusive']} inconclusive):")
+            f"{c['not-detected']} not-detected, {c['inconclusive']} inconclusive, "
+            f"{c.get('skipped', 0)} skipped):")
         with_subtests = frozenset(u["test"] for u in units if u["subtest"])
+        hidden = 0
         for u in units:
+            if u["status"] == vd.NOT_DETECTED and not show_all:
+                hidden += 1
+                continue
             add(f"  [{u['status']}] {_unit_label(u, with_subtests)}")
             add(f"      before: {_outcome_text(u['before'])}  after: {_outcome_text(u['after'])}")
             if u["status"] == vd.DETECTED:
@@ -147,6 +193,9 @@ def render_text(report):
                 add("      passes on both sides: this unit does not tell before and after apart")
             else:
                 add(f"      reason: {u['reason']}")
+        if hidden:
+            add(f"  {hidden} not-detected unit(s) not listed: they pass on both sides and do "
+                "not tell before and after apart. Use --show-all to list them.")
     add("")
     return "\n".join(lines)
 
@@ -168,9 +217,12 @@ def run(args):
             wt.add_worktree(repo, path, sha)
             created.append(path)
         test_info = [{"path": t, "in_before": wt.copy_test_file(after_dir, before_dir, t)} for t in tests]
+        runner, runner_note = choose_runner(args.runner, after_dir, tests)
+        if runner == "pytest":
+            check_pytest_available(args.python)
         sides = {
-            "before": run_side(args.python, before_dir, tests, args.timeout, scratch, "before"),
-            "after": run_side(args.python, after_dir, tests, args.timeout, scratch, "after"),
+            "before": run_side(args.python, before_dir, tests, args.timeout, scratch, "before", runner),
+            "after": run_side(args.python, after_dir, tests, args.timeout, scratch, "after", runner),
         }
     finally:
         if args.keep:
@@ -184,6 +236,9 @@ def run(args):
     result = vd.evaluate(sides["before"], sides["after"])
     return {
         "verdict": result["verdict"],
+        "runner": runner,
+        "runner_requested": args.runner,
+        "runner_note": runner_note,
         "exit_code": EXIT_CODES[result["verdict"]],
         "before": {"sha": before_sha, "explicit": bool(args.before)},
         "after": {"sha": after_sha},
@@ -208,7 +263,7 @@ def main(argv=None):
     if args.json:
         print(json.dumps(report, indent=2))
     else:
-        print(render_text(report))
+        print(render_text(report, show_all=args.show_all))
     return report["exit_code"]
 
 

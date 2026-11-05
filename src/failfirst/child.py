@@ -1,9 +1,11 @@
-"""Run unittest test modules inside one checkout and write per-test results as JSON.
+"""Run test files inside one checkout and write per-test results as JSON.
 
 This file is executed by path (not imported) in a separate interpreter whose
-cwd is the checkout, so it must only use the standard library.
+cwd is the checkout. It only uses the standard library, except that the pytest
+runner imports pytest from the target interpreter.
 
-Usage: child.py --worktree DIR --out FILE --test tests/test_x.py [--test ...]
+Usage: child.py --worktree DIR --out FILE [--runner unittest|pytest]
+                --test tests/test_x.py [--test ...]
 """
 
 import argparse
@@ -164,11 +166,109 @@ def import_check(roots, worktree, skip_names):
     return mods
 
 
+# A unit's outcome is the worst outcome of its setup/call/teardown phases.
+_SEVERITY = {"pass": 0, "expected_failure": 1, "skip": 2, "unexpected_success": 3,
+             "failure": 4, "error": 5}
+MAX_LOAD_ERROR = 2000
+
+
+def _skip_reason(report):
+    lr = report.longrepr
+    reason = lr[2] if isinstance(lr, tuple) and len(lr) == 3 else str(lr or "")
+    if reason.startswith("Skipped: "):
+        reason = reason[len("Skipped: "):]
+    return reason[:MAX_MESSAGE]
+
+
+def make_pytest_recorder(pytest):
+    """Build the plugin object. Needs the pytest module, so it is created lazily."""
+
+    class Recorder:
+        def __init__(self):
+            self.units = {}  # nodeid -> record, in first-seen order
+            self.load_errors = []
+            self.subtest_failed = set()
+
+        def _merge(self, nodeid, outcome, **info):
+            rec = self.units.get(nodeid)
+            if rec is None:
+                rec = {"test": nodeid, "subtest": None, "outcome": "pass",
+                       "exc_type": None, "message": None, "traceback": None}
+                self.units[nodeid] = rec
+            if _SEVERITY[outcome] > _SEVERITY[rec["outcome"]]:
+                rec.update(outcome=outcome, exc_type=None, message=None, traceback=None)
+                rec.update(info)
+
+        @pytest.hookimpl(hookwrapper=True)
+        def pytest_runtest_makereport(self, item, call):
+            outcome = yield
+            report = outcome.get_result()
+            nodeid = item.nodeid
+            excinfo = call.excinfo
+            wasxfail = hasattr(report, "wasxfail")
+            if report.skipped:
+                if wasxfail:
+                    self._merge(nodeid, "expected_failure", message=str(report.wasxfail))
+                else:
+                    self._merge(nodeid, "skip", message=_skip_reason(report))
+            elif report.failed:
+                if excinfo is None and str(report.longrepr).startswith("[XPASS(strict)]"):
+                    self._merge(nodeid, "unexpected_success")
+                elif excinfo is None:
+                    self._merge(nodeid, "error", message=str(report.longrepr)[:MAX_MESSAGE])
+                else:
+                    failure_exc = getattr(getattr(item, "instance", None),
+                                          "failureException", AssertionError)
+                    is_assertion = (report.when == "call"
+                                    and excinfo.errisinstance((AssertionError, failure_exc)))
+                    self._merge(nodeid, "failure" if is_assertion else "error",
+                                **_describe((excinfo.type, excinfo.value, excinfo.tb), item))
+            elif wasxfail and report.when == "call":
+                self._merge(nodeid, "unexpected_success")
+            else:
+                self._merge(nodeid, "pass")
+
+        def pytest_runtest_logreport(self, report):
+            # pytest 9 reports a failing subtest separately and can still mark the
+            # test body as passed, so remember it and refuse to call the test a pass.
+            if hasattr(report, "context") and report.failed:
+                self.subtest_failed.add(report.nodeid)
+
+        def pytest_collectreport(self, report):
+            if report.failed:
+                text = (report.longreprtext or "collection failed")[-MAX_LOAD_ERROR:]
+                self.load_errors.append(f"{report.nodeid}: {text}")
+
+        def finish(self):
+            for nodeid in self.subtest_failed:
+                self._merge(nodeid, "error", exc_type="SubtestFailed",
+                            message="a subtest failed; failfirst does not judge pytest "
+                                    "subtests one by one")
+            return list(self.units.values())
+
+    return Recorder()
+
+
+def run_pytest(test_paths, payload):
+    import pytest
+
+    recorder = make_pytest_recorder(pytest)
+    args = list(test_paths) + ["-p", "no:cacheprovider", "-q"]
+    code = int(pytest.main(args, plugins=[recorder]))
+    payload["load_errors"].extend(recorder.load_errors)
+    if code in (2, 3, 4) and not payload["load_errors"]:
+        names = {2: "interrupted", 3: "internal error", 4: "usage error"}
+        payload["load_errors"].append(f"pytest exited with code {code} ({names[code]})")
+    payload["results"] = recorder.finish()
+    payload["tests_run"] = len(payload["results"])
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--worktree", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--test", action="append", required=True)
+    ap.add_argument("--runner", choices=("unittest", "pytest"), default="unittest")
     args = ap.parse_args(argv)
 
     worktree = os.path.abspath(args.worktree)
@@ -193,26 +293,29 @@ def main(argv=None):
     module_names = [module_name(t) for t in args.test]
     skip = {n.split(".")[0] for n in module_names}
     try:
-        loader = unittest.TestLoader()
-        suite = unittest.TestSuite()
-        for name in module_names:
-            try:
-                suite.addTests(loader.loadTestsFromName(name))
-            except BaseException:
-                payload["load_errors"].append(f"{name}: {traceback.format_exc()}")
-        payload["load_errors"].extend(loader.errors)
-        failed = [
-            t.id()
-            for t in _walk(suite)
-            if isinstance(t, unittest.loader._FailedTest)
-        ]
-        if failed and not payload["load_errors"]:
-            payload["load_errors"].extend(f"failed to load {tid}" for tid in failed)
-        if not payload["load_errors"]:
-            result = RecordingResult()
-            suite.run(result)
-            payload["tests_run"] = result.tests_started
-            payload["results"] = result.records
+        if args.runner == "pytest":
+            run_pytest([t.replace(os.sep, "/") for t in args.test], payload)
+        else:
+            loader = unittest.TestLoader()
+            suite = unittest.TestSuite()
+            for name in module_names:
+                try:
+                    suite.addTests(loader.loadTestsFromName(name))
+                except BaseException:
+                    payload["load_errors"].append(f"{name}: {traceback.format_exc()}")
+            payload["load_errors"].extend(loader.errors)
+            failed = [
+                t.id()
+                for t in _walk(suite)
+                if isinstance(t, unittest.loader._FailedTest)
+            ]
+            if failed and not payload["load_errors"]:
+                payload["load_errors"].extend(f"failed to load {tid}" for tid in failed)
+            if not payload["load_errors"]:
+                result = RecordingResult()
+                suite.run(result)
+                payload["tests_run"] = result.tests_started
+                payload["results"] = result.records
     except BaseException:
         payload["fatal"] = traceback.format_exc()
     try:
