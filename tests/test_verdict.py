@@ -67,6 +67,45 @@ class VerdictTests(unittest.TestCase):
         r = vd.evaluate(side([rec("skip")]), side([rec("pass")]))
         self.assertEqual(r["verdict"], vd.INCONCLUSIVE)
 
+    def test_skipped_on_both_sides_is_a_skipped_unit(self):
+        r = vd.evaluate(side([rec("skip", msg="needs wcwidth")]),
+                        side([rec("skip", msg="needs wcwidth")]))
+        self.assertEqual(r["units"][0]["status"], vd.SKIPPED)
+        self.assertIn("needs wcwidth", r["units"][0]["reason"])
+        self.assertEqual(r["counts"]["skipped"], 1)
+
+    def test_skipped_on_one_side_only_is_inconclusive(self):
+        for b, a in (("skip", "pass"), ("pass", "skip")):
+            r = vd.evaluate(side([rec(b)]), side([rec(a)]))
+            self.assertEqual(r["units"][0]["status"], vd.INCONCLUSIVE, (b, a))
+            self.assertEqual(r["verdict"], vd.INCONCLUSIVE, (b, a))
+            self.assertEqual(r["counts"]["skipped"], 0)
+
+    def test_detected_with_unrelated_skip_is_detected(self):
+        other = "tests.test_x.Case.test_skipped"
+        before = side([FAIL, rec("skip", test=other, msg="no wcwidth")])
+        after = side([rec("pass"), rec("skip", test=other, msg="no wcwidth")])
+        r = vd.evaluate(before, after)
+        self.assertEqual(r["verdict"], vd.DETECTED)
+        self.assertEqual(r["reasons"], [])
+        self.assertEqual((r["counts"]["detected"], r["counts"]["skipped"]), (1, 1))
+
+    def test_not_detected_plus_skip_is_inconclusive(self):
+        other = "tests.test_x.Case.test_skipped"
+        before = side([rec("pass"), rec("skip", test=other, msg="no wcwidth")])
+        after = side([rec("pass"), rec("skip", test=other, msg="no wcwidth")])
+        r = vd.evaluate(before, after)
+        self.assertEqual(r["verdict"], vd.INCONCLUSIVE)
+        self.assertIn("1 test(s) were skipped on both sides; they may be the ones "
+                      "that exercise the fix", r["reasons"][0])
+        self.assertTrue(any(other in x and "no wcwidth" in x for x in r["reasons"]))
+
+    def test_inconclusive_unit_still_wins_over_detected_and_skipped(self):
+        other = "tests.test_x.Case.test_skipped"
+        before = side([FAIL, rec("skip", test=other), rec("error", "(x=1)", exc="KeyError")])
+        after = side([rec("pass"), rec("skip", test=other), rec("pass", "(x=1)")])
+        self.assertEqual(vd.evaluate(before, after)["verdict"], vd.INCONCLUSIVE)
+
     def test_missing_on_a_side(self):
         r = vd.evaluate(side([FAIL]), side([rec("pass"), rec("pass", test="tests.t.C.other")]))
         self.assertEqual(r["verdict"], vd.INCONCLUSIVE)
