@@ -30,7 +30,7 @@ Python 3.10+, standard library only.
 - Install with `py -m pip install -e .`
 - If the `failfirst` command is not found, run it as `py -m failfirst.cli ...` instead.
 - Tested: the python-slugify PR #204 acceptance run below was done by hand on Windows (Python 3.13) and gave the same result as on Linux: `detected`, 10 detected / 7 not-detected / 0 inconclusive.
-- Known limitation: `--timeout` does not work on Windows. The timeout handling uses `os.killpg` (and `signal.SIGKILL`), which do not exist on Windows, so when a side hits the timeout the call raises `AttributeError`. It is not caught by the `OSError` fallback, so it reaches the generic handler in `main`: failfirst prints `failfirst: internal error: AttributeError: ...` and exits with code 3, not `inconclusive` (exit 2). The temporary worktrees are still removed, but the timed-out test process is not killed and may keep running. This is documented only, not fixed.
+- Known limitation: `--timeout` does not work on Windows. The timeout handling uses `os.killpg` (and `signal.SIGKILL`), which do not exist on Windows, so when a side hits the timeout the call raises `AttributeError`. It is not caught by the `OSError` fallback, so it reaches the generic handler in `main`: failfirst prints `failfirst: internal error: AttributeError: ...` and exits with code 3, not `inconclusive` (exit 2). The timed-out test process is not killed and may keep running; failfirst still tries to remove the temporary worktrees, but files that process holds open may be left behind. This is based on reading the code, not on a Windows test run, and is documented only, not fixed.
 
 ## Usage
 
