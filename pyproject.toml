@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "failfirst"
+version = "0.1.0"
+description = "Check whether a test added or changed by a fix commit actually fails on the code before the fix."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = []
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+]
+
+[project.scripts]
+failfirst = "failfirst.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
