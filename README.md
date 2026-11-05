@@ -70,10 +70,10 @@ Per test / subTest (17 units: 10 detected, 7 not-detected, 0 inconclusive):
   ... (8 more detected units) ...
   [not-detected] …ModernWordBoundaryTests.test_replacement_delimiters_are_budgeted_and_preserved (replacement='one--two--three', separator='', limit=8, save_order=False)
       before: pass  after: pass
-      passes on both sides: guards existing behavior, does not touch the bug
+      passes on both sides: this unit does not tell before and after apart
   [not-detected] …ModernWordBoundaryTests.test_replacement_delimiters_are_budgeted_and_preserved (replacement='one--two--three', separator='', limit=8, save_order=True)
       before: pass  after: pass
-      passes on both sides: guards existing behavior, does not touch the bug
+      passes on both sides: this unit does not tell before and after apart
   ... (remaining not-detected units) ...
 ```
 

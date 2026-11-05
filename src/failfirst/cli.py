@@ -134,7 +134,7 @@ def render_text(report):
             if u["status"] == vd.DETECTED:
                 add(f"      evidence (before): {u['evidence'].splitlines()[0]}")
             elif u["status"] == vd.NOT_DETECTED:
-                add("      passes on both sides: guards existing behavior, does not touch the bug")
+                add("      passes on both sides: this unit does not tell before and after apart")
             else:
                 add(f"      reason: {u['reason']}")
     add("")
