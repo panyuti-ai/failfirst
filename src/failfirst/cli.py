@@ -85,8 +85,17 @@ def _short(sha):
     return sha[:12]
 
 
-def _unit_label(u):
-    return u["test"] + (f" {u['subtest']}" if u["subtest"] else "")
+def _unit_label(u, tests_with_subtests=frozenset()):
+    if u["subtest"]:
+        return f"{u['test']} {u['subtest']}"
+    if u["test"] in tests_with_subtests:
+        return f"{u['test']} (test body, outside subTests)"
+    return u["test"]
+
+
+def _outcome_text(outcome):
+    # Text report only; the JSON report keeps the raw value.
+    return "pass (subTests reported separately)" if outcome == "subtests_only" else outcome
 
 
 def render_text(report):
@@ -128,9 +137,10 @@ def render_text(report):
         add("")
         add(f"Per test / subTest ({len(units)} units: {c['detected']} detected, "
             f"{c['not-detected']} not-detected, {c['inconclusive']} inconclusive):")
+        with_subtests = frozenset(u["test"] for u in units if u["subtest"])
         for u in units:
-            add(f"  [{u['status']}] {_unit_label(u)}")
-            add(f"      before: {u['before']}  after: {u['after']}")
+            add(f"  [{u['status']}] {_unit_label(u, with_subtests)}")
+            add(f"      before: {_outcome_text(u['before'])}  after: {_outcome_text(u['after'])}")
             if u["status"] == vd.DETECTED:
                 add(f"      evidence (before): {u['evidence'].splitlines()[0]}")
             elif u["status"] == vd.NOT_DETECTED:
