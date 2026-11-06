@@ -22,6 +22,7 @@ unexpected_success, and (test bodies only) subtests_only.
 DETECTED = "detected"
 NOT_DETECTED = "not-detected"
 INCONCLUSIVE = "inconclusive"
+SKIPPED = "skipped"  # unit status only: skipped on both sides
 
 PASSING = ("pass", "subtests_only")
 
@@ -95,6 +96,9 @@ def compare_unit(before, after):
         missing = [n for n, r in (("before", before), ("after", after)) if r is None]
         return INCONCLUSIVE, "missing on " + " and ".join(missing) + " side"
     bo, ao = before["outcome"], after["outcome"]
+    if bo == "skip" and ao == "skip":
+        why = before.get("message") or after.get("message") or "no reason given"
+        return SKIPPED, f"skipped on both sides: {why}"
     if not _is_pass(ao):
         extra = f": {after['exc_type']}" if after.get("exc_type") else ""
         return INCONCLUSIVE, f"after side did not pass (outcome {ao}{extra})"
@@ -115,6 +119,11 @@ def evaluate(before, after):
 
     Returns {"verdict", "reasons", "units", "counts"}. ``reasons`` lists every
     cause of an inconclusive result (empty otherwise).
+
+    A unit skipped on both sides has status ``skipped``. It is not a pass, but it
+    does not spoil a ``detected`` verdict either; without any detected unit it
+    makes the verdict inconclusive, because the skipped test may be the one that
+    exercises the fix.
     """
     reasons = []
     for name, side in (("before", before), ("after", after)):
@@ -151,7 +160,7 @@ def evaluate(before, after):
     if not reasons and not units:
         reasons.append("no comparable test results were recorded")
 
-    counts = {DETECTED: 0, NOT_DETECTED: 0, INCONCLUSIVE: 0}
+    counts = {DETECTED: 0, NOT_DETECTED: 0, INCONCLUSIVE: 0, SKIPPED: 0}
     for u in units:
         counts[u["status"]] += 1
 
@@ -159,6 +168,16 @@ def evaluate(before, after):
         verdict = INCONCLUSIVE
     elif counts[DETECTED] > 0:
         verdict = DETECTED
+    elif counts[SKIPPED] > 0:
+        verdict = INCONCLUSIVE
+        reasons.append(
+            f"{counts[SKIPPED]} test(s) were skipped on both sides; they may be the "
+            "ones that exercise the fix"
+        )
+        for u in units:
+            if u["status"] == SKIPPED:
+                label = u["test"] + (f" {u['subtest']}" if u["subtest"] else "")
+                reasons.append(f"{label}: {u['reason']}")
     else:
         verdict = NOT_DETECTED
     return {"verdict": verdict, "reasons": reasons, "units": units, "counts": counts}

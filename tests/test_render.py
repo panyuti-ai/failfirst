@@ -25,7 +25,7 @@ def _report(units):
         "after": {"sha": "b" * 40},
         "tests": [{"path": "tests/test_x.py", "in_before": "added"}],
         "reasons": [],
-        "counts": {"detected": 1, "not-detected": 2, "inconclusive": 0},
+        "counts": {"detected": 1, "not-detected": 2, "inconclusive": 0, "skipped": 0},
         "units": units,
         "sides": {"before": _side(), "after": _side()},
     }
@@ -38,7 +38,7 @@ class RenderTextTests(unittest.TestCase):
                   evidence="AssertionError: boom"),
             _unit(BODY, None, "subtests_only", "pass", "not-detected"),
             _unit(PLAIN, None, "pass", "pass", "not-detected"),
-        ]))
+        ]), show_all=True)
 
     def test_body_of_test_with_subtests_is_labelled(self):
         self.assertIn(f"[not-detected] {BODY} (test body, outside subTests)", self.text)
@@ -53,6 +53,18 @@ class RenderTextTests(unittest.TestCase):
 
     def test_subtest_unit_keeps_its_own_label(self):
         self.assertIn(f"[detected] {BODY} (n=1)\n", self.text)
+
+    def test_not_detected_units_are_hidden_by_default(self):
+        text = render_text(_report([
+            _unit(PLAIN, None, "pass", "pass", "not-detected"),
+            _unit(BODY, None, "skip", "skip", "skipped",
+                  reason="skipped on both sides: needs wcwidth"),
+        ]))
+        self.assertNotIn(f"[not-detected] {PLAIN}", text)
+        self.assertIn("1 not-detected unit(s) not listed", text)
+        self.assertIn("--show-all", text)
+        self.assertIn(f"[skipped] {BODY}", text)
+        self.assertIn("needs wcwidth", text)
 
 
 if __name__ == "__main__":
